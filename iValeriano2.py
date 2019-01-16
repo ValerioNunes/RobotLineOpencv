@@ -9,11 +9,14 @@ import math
 import requests
 import threading
 
-# from sklearn import tree
-# from sklearn.metrics import classification_report, confusion_matrix  
-# from numpy.random import seed
-# import pandas as pd
-# from sklearn.model_selection import cross_val_score
+from joblib import dump, load
+from sklearn import tree
+from sklearn.metrics import classification_report, confusion_matrix  
+from numpy.random import seed
+import pandas as pd
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import train_test_split  
+
 
 
 class Robot:
@@ -178,7 +181,7 @@ class Robot:
             if(self.YTreinamento == ''):
                 self.proxMovimentacao(curva)
             else:
-                self.enviarAcaoParaNode(self.YTreinamento)
+                self.enviarAcaoParaNode(self.acao[self.YTreinamento])
 
     def weighted_img(self,img, initial_img, a=0.8, b=1., l=0.):
         return cv2.addWeighted(initial_img, a, img, b, l) 
@@ -213,6 +216,23 @@ class Robot:
     def imgTreinamento(self):
         return cv2.imread('imgTreinamento.png')
 
+    def persistenceModel(self,clf):
+            dump(clf, 'MemoriaValerianoRobot.joblib') 
+
+    def iniciarTreinamento(self,df):
+            Y = df['comando']
+            X = df.drop(columns = ['comando'])
+            X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.30,random_state=1)  
+            clf = tree.DecisionTreeClassifier()
+            clf = clf.fit(X_train, y_train)
+            y_pred = clf.predict(X_test)
+            print(confusion_matrix(y_test, y_pred))  
+            print(classification_report(y_test, y_pred))
+
+            self.persistenceModel(clf)
+
+
+
     def treinarRobot(self):
             image = self.imgTreinamento()
             cv2.namedWindow("Tela_Treinamento")
@@ -220,11 +240,12 @@ class Robot:
             cv2.imshow("Tela_Treinamento", image)
 
             self.Start()
-            
-            labels = ['inclinacaoCos', 'pos', 'comando']
-            df = pd.DataFrame.from_records(self.dataSet, columns=labels)
-            print df
-            print 'Treinamento Finalizado'
+            if(len(self.dataSet) > 0 ):
+                labels = ['inclinacaoCos', 'pos', 'comando']
+                df = pd.DataFrame.from_records(self.dataSet, columns=labels)
+                self.iniciarTreinamento(df)
+                print 'Treinamento Finalizado'
+
 
     def mudarYTreinamento(self,cmd):
         if(self.YTreinamento == cmd):
@@ -250,16 +271,16 @@ class Robot:
             Y = image.shape[0]
 
             if((y < Y/2) and (x < X/2)):
-                cmd = self.acao[0]
+                cmd =  0 # self.acao[0]
             else:
                 if((y < Y/2) and (x > X/2)):
-                    cmd = self.acao[1]
+                    cmd = 1 #self.acao[1]
                 else:
                     if((y > Y/2) and (x > X/2)):
-                        cmd = self.acao[2]  
+                        cmd = 2 #self.acao[2]  
                     else:
                         if((y > Y/2) and (x < X/2)):
-                            cmd = self.acao[3]   
+                            cmd = 3 # self.acao[3]   
 
             if(self.mudarYTreinamento(cmd)):
                 cv2.circle(image,(x, y), 13, (0,0,255), -1)
@@ -274,9 +295,10 @@ def main():
     v = Robot(cam = 'android')
     v.treinarRobot()
     #v.Start()
-
     v.cap.release()
+
+try:
+    main()
+finally:
+    getRequestNodeMCU('http://192.168.137.59/stop')
     cv2.destroyAllWindows()
-
-
-main()
