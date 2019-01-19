@@ -8,7 +8,7 @@ import urllib
 import math
 import requests
 import threading
-
+import socket
 from joblib import dump, load
 from sklearn import tree
 from sklearn.metrics import classification_report, confusion_matrix  
@@ -22,16 +22,19 @@ from sklearn.model_selection import train_test_split
 class Robot:
     def __init__(self ,  cam = 'webcam'):
 
-        self.url='http://192.168.137.187:8080/shot.jpg'
-        self.urlNode = 'http://192.168.137.59'
+        self.url='http://192.168.0.102:8080/shot.jpg'
+        self.UDP_IP = "192.168.0.100"
+        self.UDP_PORT = 1234
 
-        self.acao = ['stop','frente','direita','esquerda']
+
+
+        self.acao = ['stop','frente','direita','esquerda','re']
         self.rho_resolution = 1
         self.theta_resolution = np.pi/180
         self.threshold = 155
-        self.areaInteresse_X2 = 0.85
-        self.areaInteresse_X1 = 0.40
-        self.areaInteresse_Y = 0.15
+        self.areaInteresse_X2 = 0.95
+        self.areaInteresse_X1 = 0.30
+        self.areaInteresse_Y = 0.25
         self.W = 0 
         self.H = 0
         self.cap = cv2.VideoCapture(0)
@@ -43,7 +46,15 @@ class Robot:
         self.MaxParaEmergencia = 25
         self.ThreadRequet = None
         self.inputCam = cam
-
+        self.v1 = 200
+        self.v2 = 200
+        self.dadosAcao = {}
+        self.dadosAcao['stop']     = [0,0,0,0]
+        self.dadosAcao['frente']   = [0,0,self.v1,self.v2]
+        self.dadosAcao['direita']  = [0,1,self.v1,self.v2]
+        self.dadosAcao['esquerda'] = [1,0,self.v1,self.v1]
+        self.dadosAcao['re']       = [1,1,self.v1,self.v2]
+        self.clf = None
 
     def areaInteresse(self,img):        
         M = cv2.getRotationMatrix2D((int(img.shape[0])/2,int(img.shape[1])/2),-90,1)
@@ -99,9 +110,10 @@ class Robot:
                 if(self.ThreadRequet is not (None)):
                     if(self.ThreadRequet.isAlive()):
                         return False
-
-                url = self.urlNode+"/"+cmd
-                self.ThreadRequet = threading.Thread(target= getRequestNodeMCU,args=(url,))
+                
+                motor = self.dadosAcao[cmd]
+                print cmd
+                self.ThreadRequet = threading.Thread(target= realizarComado,args=(self.UDP_IP,self.UDP_PORT, motor[0],motor[1], motor[2] , motor[3],))
                 self.ThreadRequet.start()
                 self.UltimaAcao  = cmd
                 return True
@@ -111,7 +123,7 @@ class Robot:
                 return False
 
 
-    def proxMovimentacao(self,curva):
+    def proxMovimentacao(self,curva,img):
         direita = 0 
         esqueda = 0 
 
@@ -119,15 +131,15 @@ class Robot:
         
             comando = self.acao[1] #'frente'
             self.ContadorZeroLinhas = 0
+            
             for angulo, pos in curva: 
-                if(pos < self.areaInteresse_X1*self.W ):
-                        esqueda = esqueda + 1
-                if(pos > self.areaInteresse_X2*self.W ):
-                        direita = direita + 1
-                if((angulo > self.pontosLimitesAng[0]) and (angulo < 150 )):
-                        direita = direita + 1
-                if((angulo < self.pontosLimitesAng[1]) and (angulo > 150 )):
-                        esqueda = esqueda + 1
+                if(self.clf is not (None) ):
+                    x=np.array([angulo, pos])
+                    proxAcao = self.clf.predict(x.reshape(1,-1))
+                    if(proxAcao ==  1 ):
+                            esqueda = esqueda + 1
+                    if(proxAcao ==  2 ):
+                            direita = direita + 1
 
             if(direita >  esqueda):
                 comando =  self.acao[2]#'direita'
@@ -138,7 +150,11 @@ class Robot:
         else:
             self.ContadorZeroLinhas += 1
             if(self.ContadorZeroLinhas > self.MaxParaEmergencia ):
-                    self.enviarAcaoParaNode(self.acao[0])#'stop'   
+                    comando =  self.acao[0]
+                    self.enviarAcaoParaNode(comando)#'stop'  
+
+        cv2.putText(img, comando.upper(), (50,100), cv2.FONT_HERSHEY_SIMPLEX,1, (255, 255, 255), 3)
+                
 
 
     def desenharLinhas(self,theta,rho,i,img, color=[0, 255, 0], thickness=7):
@@ -154,7 +170,6 @@ class Robot:
             y2 = int(y0 - 1000*(a))
             if((angulo != 0) and (angulo != 90)): 
                 msg =   str(angulo) + "Graus | "+ str(pos) + "Final"
-                cv2.putText(img, msg, (int(pos),100 + i), cv2.FONT_HERSHEY_SIMPLEX,0.7, (255, 255, 255), 1)
                 color=[0, 255, 0]
             else:
                 color=[255 , 0, 0]
@@ -170,7 +185,7 @@ class Robot:
                         pos    = a*rho
                         angulo = int(math.degrees(theta))
                         if((angulo != 0) and (angulo != 90)): 
-                            curva.append([angulo,pos])
+                            curva.append([a,pos])
                             if(self.YTreinamento != ''):
                                 self.dataSet.append((a,pos,self.YTreinamento))
                         self.desenharLinhas(theta,rho,i,img)
@@ -179,7 +194,7 @@ class Robot:
                         self.enviarAcaoParaNode(self.acao[0])#'stop'
             
             if(self.YTreinamento == ''):
-                self.proxMovimentacao(curva)
+                self.proxMovimentacao(curva,img)
             else:
                 self.enviarAcaoParaNode(self.acao[self.YTreinamento])
 
@@ -192,8 +207,8 @@ class Robot:
         if(linhasDetectadas is not (None)):
             hough_lines_image = np.zeros_like(image)
             self.analiseLinnhas(hough_lines_image, linhasDetectadas)
-            original_image_with_hough_lines = self.weighted_img(hough_lines_image,image)
-            return  original_image_with_hough_lines
+            #original_image_with_hough_lines = self.weighted_img(hough_lines_image,image)
+            return  hough_lines_image # original_image_with_hough_lines
 
         return None
 
@@ -231,8 +246,6 @@ class Robot:
 
             self.persistenceModel(clf)
 
-
-
     def treinarRobot(self):
             image = self.imgTreinamento()
             cv2.namedWindow("Tela_Treinamento")
@@ -246,23 +259,6 @@ class Robot:
                 self.iniciarTreinamento(df)
                 print 'Treinamento Finalizado'
 
-
-    def mudarYTreinamento(self,cmd):
-        if(self.YTreinamento == cmd):
-            self.YTreinamento = ''
-            return False
-        else:
-            self.YTreinamento = cmd
-            return True
-
-    def Start(self):
-            while 1:
-                deteccao = self.detectarCaminho()
-                if(deteccao is not (None)):
-                    cv2.imshow('img',deteccao[::2,::2])
-                k = cv2.waitKey(30) & 0xff
-                if k == 27:
-                    break     
     def clickComandoTreinamento(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             image =  self.imgTreinamento()
@@ -286,19 +282,42 @@ class Robot:
                 cv2.circle(image,(x, y), 13, (0,0,255), -1)
             cv2.imshow("Tela_Treinamento", image)
 
+    def mudarYTreinamento(self,cmd):
+        if(self.YTreinamento == cmd):
+            self.YTreinamento = ''
+            return False
+        else:
+            self.YTreinamento = cmd
+            return True
 
-def getRequestNodeMCU(url):
-    r = requests.get(url)
-    print 'Request: ', url , r
+    def Start(self):
+            self.clf = load('MemoriaValerianoRobot.joblib') 
+            while 1:
+                deteccao = self.detectarCaminho()
+                if(deteccao is not (None)):
+                    cv2.imshow('img',deteccao)
+                k = cv2.waitKey(3) & 0xff
+                if k == 27:
+                    break  
+
+
+sock = socket.socket(socket.AF_INET,socket.SOCK_DGRAM) 
+
+def realizarComado(UDP_IP, UDP_PORT, m1s , m2s  , m1v ,  m2v  ):
+       MESSAGE =  '{0}{1}{2}{3}'.format(m1s,m2s,m1v,m2v) 
+       sock.sendto(MESSAGE, (UDP_IP, UDP_PORT))
+
+v = Robot(cam = 'android')
 
 def main():                        
-    v = Robot(cam = 'android')
-    v.treinarRobot()
-    #v.Start()
+    realizarComado(v.UDP_IP, v.UDP_PORT,0, 0,0, 0) # STOP
+    #v.treinarRobot()
+    v.Start()
     v.cap.release()
+    cv2.destroyAllWindows()
 
 try:
     main()
 finally:
-    getRequestNodeMCU('http://192.168.137.59/stop')
+    realizarComado(v.UDP_IP, v.UDP_PORT,0, 0,0, 0)
     cv2.destroyAllWindows()
